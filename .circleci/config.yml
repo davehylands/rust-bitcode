@@ -1,8 +1,217 @@
-version: 2
+######################
+#       NOTES        #
+######################
+
+version: 2.1
+
+###########################
+#       REFERENCES        #
+###########################
+
+# The "references" node isn't defined as part of the circleci config schema.  Instead this is just a
+# safe dumping ground for chunks of YAML ("anchors" is the technical name) that we want to be able to
+# reuse in multiple places later in the "real" config (jobs and workflows).
+
+references:
+  defaultEnvVars: &defaultEnvVars
+    TERM: dumb
+    FS_LOCAL: ci
+    FS_HOME: /src/mn/projects/fullstory
+    GOPATH: /src/mn/projects/fullstory/go
+    JVM_OPTS: -Xmx3200m
+    NO_FWATCH: yes
+
+  androidEnvVars: &androidEnvVars
+    ANDROID_NDK_HOMEX: "/opt/android-ndk"
+
+  setEnvVars: &setEnvVars
+    run:
+      name: alias circle environment vars
+      command: |
+        # we echo both to output (so we can see the env vars in the build output logs)
+        # and to BASH_ENV, so they get included in environment of subsequent steps
+
+        if [ "$CIRCLE_BRANCH" == "master" ] || [[ "$CIRCLE_BRANCH" == fs-release-* ]] || [[ "$CIRCLE_BRANCH" == fs-nm-framework-release-* ]] || [[ "$CREATE_FEATURE_BRANCH_ARTIFACT" == "yes" ]]; then
+          echo 'export CREATE_NO_ARTIFACT=""' >> $BASH_ENV
+          echo "CREATE_NO_ARTIFACT="
+        else
+          # any unrecognized branches are assumed to be feature branches
+          echo 'export CREATE_NO_ARTIFACT=true' >> $BASH_ENV
+          echo "CREATE_NO_ARTIFACT=true"
+        fi
+
+        if [[ "$CIRCLE_BRANCH" == fs-nm-framework-release-* ]]; then
+          echo 'export NATIVEMOBILE_PLUGIN_RELEASE=true' >> $BASH_ENV
+          echo "NATIVEMOBILE_PLUGIN_RELEASE=true"
+        else
+          # any unrecognized branches are assumed to be non-Android plugin release branches
+          echo 'export NATIVEMOBILE_PLUGIN_RELEASE=false' >> $BASH_ENV
+          echo "NATIVEMOBILE_PLUGIN_RELEASE=false"
+        fi
+
+        echo 'export GIT_HASH="$CIRCLE_SHA1"' >> $BASH_ENV
+        echo 'export BRANCH_NAME="$CIRCLE_BRANCH"' >> $BASH_ENV
+        echo 'export CHANGE_URL="$CIRCLE_COMPARE_URL"' >> $BASH_ENV
+        echo 'export BUILD_URL="$CIRCLE_BUILD_URL"' >> $BASH_ENV
+        echo 'export PATH="/src/mn/projects/fullstory/go/bin:$PATH"' >> $BASH_ENV
+
+        # NB(jh): While it seems simpler to just dump the contents of $BASH_ENV for this,
+        # that will inadvertently poison the CI output logs with sensitive data since
+        # environment variables are how Circle CI provides secrets to the builders.
+        echo "GIT_HASH=$CIRCLE_SHA1"
+        echo "BRANCH_NAME=$CIRCLE_BRANCH"
+        echo "CHANGE_URL=$CIRCLE_COMPARE_URL"
+        echo "BUILD_URL=$CIRCLE_BUILD_URL"
+        echo "PATH=/src/mn/projects/fullstory/go/bin:$PATH"
+
+  androidDockerImage: &androidDockerImage
+      image: circleci/android:api-27-node
+
+##########################
+#        COMMANDS        #
+##########################
+commands:
+  rustup:
+    description: "Install rustup, along with the rust toolchain and tools"
+    parameters:
+      cache_arch:
+        description: Expected to be `ios` or `android`. This is needed because the home directories are in different locations for ios and android.
+        type: string
+    steps:
+      - restore_cache:
+          name: "Restoring << parameters.cache_arch >> rustup cache"
+          keys:
+            - rustup-v1-<< parameters.cache_arch >>-{{ checksum "/src/mn/projects/fullstory/nativemobile/fs-config.properties" }}-end
+      - run:
+          name: Install rustup
+          command: |
+            #!/bin/sh
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh /dev/stdin -y --default-toolchain none
+            export PATH=${PATH}:$HOME/.cargo/bin
+            ./gradlew rustup --no-daemon
+          working_directory: /src/mn/projects/fullstory/nativemobile/shared/
+      - save_cache:
+          name: "Saving << parameters.cache_arch >> rustup cache"
+          key: rustup-v1-<< parameters.cache_arch >>-{{ checksum "/src/mn/projects/fullstory/nativemobile/fs-config.properties" }}-end
+          paths:
+            - "~/.rustup"
+  install_android_ndk:
+    description: Install android NDK
+    parameters:
+      cache_arch:
+        description: Expected to be `darwin` or `linux`. This is needed because the home directories are in different locations for ios and android.
+        type: string
+    steps:
+      - run:
+          name: Create NDK ~/android-ndk-version
+          command: |
+            #!/bin/sh
+            source ./config.sh
+            echo "NDK ${ANDROID_NDK_VERSION_LONG}" > ~/android-ndk-version            
+            cat ~/android-ndk-version
+      - restore_cache:
+          name: "Restoring << parameters.cache_arch >> android NDK cache"
+          keys:
+            - android-ndk-v1-<< parameters.cache_arch >>-{{ checksum "~/android-ndk-version" }}-end
+      - run:
+          name: Install Android NDK
+          command: |
+            #/bin/sh
+            ./install-ndk.sh << parameters.cache_arch >>
+#      - save_cache:
+#          name: "Saving << parameters.cache_arch >> android NDK cache"
+#          key: android-ndk-v1-<< parameters.cache_arch >>-{{ checksum "~/android-ndk-version" }}-end
+#          paths:
+#            - "~/android-ndk"
+
+###########################
+#        WORKFLOWS        #
+###########################
+workflows:
+  version: 2
+  build_all:
+    jobs:
+      - build_ios
+#      - build_android
+
+######################
+#        JOBS        #
+######################
 jobs:
-  build:
+  build_ios:
+    macos:
+      xcode: "11.1.0"
+#    environment:
+#      <<: *defaultEnvVars
+#      <<: *androidEnvVars
+    steps:
+#      - *setEnvVars
+      - checkout
+      - install_android_ndk:
+          cache_arch: darwin
+      - run:
+          name: Install moreutils, ninja & cmake
+          command: |
+            # Unlink parallel so we can install moreutils.  Parallel must be
+            # pre-installed by CircleCI, but we don't use it and removing it
+            # doesn't seem to hurt anything.  This fixes --
+            #
+            # Error: Cannot install moreutils because conflicting formulae
+            # are installed.
+            #   parallel: because Both install a `parallel` executable.
+            HOMEBREW_NO_INSTALL_CLEANUP=1 \
+              brew unlink parallel || true
+
+            # ts comes from moretuils.
+            HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 \
+              brew install moreutils ninja cmake
+      - run:
+          name: Build MacOSX (Darwin) version of rust toolchain
+          # Wrapping execution with `script` gets us color output even though
+          # we're piping through `ts`.  `script` simulates a real tty.
+          command: script -q -r - sh -c "./build.sh darwin && ./dist.sh && ls -l dist" | ts
+
+  build_hello:
     docker:
       - image: circleci/ruby:2.4.1
     steps:
       - checkout
       - run: echo "A first hello"
+
+  build_android:
+    docker:
+      - *androidDockerImage
+#    environment:
+#      <<: *defaultEnvVars
+#      <<: *androidEnvVars
+#      ANDROID_BUILD_BUCKET: fs-ops-deployments-android
+#      REPO_DIR: /tmp/fs-deploy-repo
+    steps:
+      - checkout
+      - run:
+          name: Build Android (Linux) version of rust toolchain
+          # Wrapping execution with `script` gets us color output even though
+          # we're piping through `ts`.  `script` simulates a real tty.
+          command: ./build-linux.sh
+#      - *setEnvVars
+#      - run:
+#          command: sudo mkdir -p /src/mn && sudo chmod 0777 /src/mn
+#      - attach_workspace:
+#          at: /src/mn/
+#      - run:
+#          name: chown /opt/
+#          command: sudo chown circleci /opt/
+#      - rustup:
+#          cache_arch: android
+#      - restore_cache:
+#          name: "Restoring android cache"
+#          keys:
+#            - android-cache-v3-{{ .Environment.CIRCLE_JOB }}-
+#      - *androidNdk
+#      - save_cache:
+#          name: "Saving android cache"
+#          key: android-cache-v3-{{ .Environment.CIRCLE_JOB }}-{{ checksum "/opt/version" }}
+#          paths:
+#            - "~/.gradle"
+#            - "~/.m2"
+#            - "/opt/android-ndk"
