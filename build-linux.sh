@@ -1,4 +1,7 @@
 #!/bin/bash
 
-echo Running build-linux.sh
-uname -a
+set -euo pipefail
+
+./install-ndk.sh
+source ./android-ndk-path.sh
+./build.sh
