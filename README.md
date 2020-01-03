@@ -5,6 +5,10 @@ The primary changes that we make are:
 * Use LLVM 8 instead of LLVM 7 (XCode 11 uses LLVM 8)
 * Include more architectures so we can use the same toolchain for both bitcode
   and non-bitcode purposes.
+* Added support for building linux versions of the toolchain
+* Build toolchains for targeting android
+
+Some additional [documentation](https://docs.google.com/document/d/194vAMknA4GzpF1qp7FwXU5uv3FPPKxwHTvHhgXjRgts/edit)
 
 ## Extra dependency steps
 
